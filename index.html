@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Controllo Corrente 4–20 mA (0–255)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 20px; }
+    h1 { font-size: 1.2rem; margin-bottom: 8px; }
+    .display { font-size: 2rem; font-weight: 600; margin: 10px 0; }
+    .percent { font-size: 1.2rem; color: #555; margin-left: 8px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0; }
+    button { padding: 10px 16px; font-size: 1rem; }
+    input[type="range"] { width: 100%; }
+    .small { font-size: 0.9rem; color: #555; }
+    .ok { color: #0a7; }
+    .err { color: #c22; }
+    .mode { margin: 12px 0; }
+    .card { border: 1px solid #ddd; padding: 12px; border-radius: 8px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+  </style>
+</head>
+<body>
+  <h1>Controllo corrente 4–20 mA (byte 0–255)</h1>
+
+  <div class="card">
+    <div class="display">
+      <span id="maDisplay">04.00 mA</span>
+      <span id="percentDisplay" class="percent">(0%)</span>
+    </div>
+    <div class="row">
+      <button id="btnPlus4">+4 mA</button>
+      <button id="btnMinus4">-4 mA</button>
+      <button id="btnPlus1">+1 mA</button>
+      <button id="btnMinus1">-1 mA</button>
+    </div>
+    <div class="row">
+      <input id="slider" type="range" min="0" max="255" value="0" />
+    </div>
+    <div class="small mono">Valore byte: <span id="byteVal">0</span></div>
+  </div>
+
+  <div class="card mode">
+    <strong>Modalità invio:</strong>
+    <div class="row">
+      <button id="useWebBluetooth">Usa Web Bluetooth</button>
+      <button id="useWebViewerBridge">Usa WebViewer (App Inventor)</button>
+    </div>
+    <div id="modeStatus" class="small"></div>
+  </div>
+
+  <div class="card" id="bleControls" style="display:none;">
+    <strong>Web Bluetooth</strong>
+    <div class="small">Seleziona il dispositivo (non si può usare l’indirizzo MAC). Servizio e caratteristica devono corrispondere.</div>
+    <div class="row">
+      <button id="btnConnect">Connetti BLE</button>
+      <button id="btnDisconnect">Disconnetti</button>
+    </div>
+    <div class="small mono">Service UUID: <span id="svcUuid">4fafc201-1fb5-459e-8fcc-c5c9c331914b</span></div>
+    <div class="small mono">Char UUID (write): <span id="chrUuid">beb5483e-36e1-4688-b7f5-ea07361b26a8</span></div>
+    <div id="bleStatus" class="small"></div>
+  </div>
+
+  <div class="card" id="wvControls" style="display:none;">
+    <strong>WebViewer bridge (App Inventor)</strong>
+    <div class="small">Invia il valore al tuo progetto App Inventor via WebViewerString. Gestisci il BLE nell’app.</div>
+    <div class="row">
+      <button id="btnSendBridge">Invia valore corrente all’app</button>
+    </div>
+    <div id="wvStatus" class="small"></div>
+  </div>
+
+  <script>
+    // Config: service/characteristic UUID (deve combaciare con ESP32)
+    const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+    const CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+
+    let byteValue = 0;
+
+    const maDisplay = document.getElementById("maDisplay");
+    const percentDisplay = document.getElementById("percentDisplay");
+    const byteLabel = document.getElementById("byteVal");
+    const slider = document.getElementById("slider");
+    const modeStatus = document.getElementById("modeStatus");
+    const bleControls = document.getElementById("bleControls");
+    const wvControls = document.getElementById("wvControls");
+    const bleStatus = document.getElementById("bleStatus");
+    const wvStatus = document.getElementById("wvStatus");
+
+    // --- Conversioni ---
+    function byteToMilliAmps(b) {
+      return 4 + (b * 16) / 255;
+    }
+    function milliAmpsToByte(mA) {
+      return Math.round((mA - 4) * 255 / 16);
+    }
+    function clamp(v) { return Math.max(0, Math.min(255, v)); }
+    function clampMilliAmps(mA) { return Math.max(4, Math.min(20, mA)); }
+    function mAToPercent(mA) { return ((mA - 4) / 16) * 100; }
+
+    // --- Pulsanti ---
+    document.getElementById("btnPlus4").addEventListener("click", () => changeByMilliAmps(4));
+    document.getElementById("btnMinus4").addEventListener("click", () => changeByMilliAmps(-4));
+    document.getElementById("btnPlus1").addEventListener("click", () => changeByMilliAmps(1));
+    document.getElementById("btnMinus1").addEventListener("click", () => changeByMilliAmps(-1));
+    slider.addEventListener("input", (e) => updateByte(clamp(parseInt(e.target.value, 10))));
+
+    // --- Cambia valore in mA ---
+    function changeByMilliAmps(delta) {
+      const currentmA = byteToMilliAmps(byteValue);
+      const newmA = clampMilliAmps(currentmA + delta);
+      const newByte = clamp(milliAmpsToByte(newmA));
+      updateByte(newByte);
+    }
+
+    // --- Modalità ---
+    document.getElementById("useWebBluetooth").addEventListener("click", () => {
+      bleControls.style.display = "";
+      wvControls.style.display = "none";
+      modeStatus.textContent = "Modalità Web Bluetooth attiva. Apri questa pagina su Chrome (Android) via HTTPS.";
+      modeStatus.className = "small ok";
+    });
+    document.getElementById("useWebViewerBridge").addEventListener("click", () => {
+      wvControls.style.display = "";
+      bleControls.style.display = "none";
+      modeStatus.textContent = "Modalità WebViewer attiva. Il valore sarà inviato a App Inventor via WebViewerString.";
+      modeStatus.className = "small ok";
+    });
+
+    // --- Aggiorna UI ---
+    function updateByte(v) {
+      byteValue = v;
+      slider.value = v;
+      byteLabel.textContent = v;
+      const mA = byteToMilliAmps(v);
+      const perc = clamp(mAToPercent(mA));
+      maDisplay.textContent = mA.toFixed(2) + " mA";
+      percentDisplay.textContent = "(" + perc.toFixed(0) + "%)";
+      sendCurrent();
+    }
+
+    // --- BLE ---
+    let bleDevice = null;
+    let bleServer = null;
+    let bleCharacteristic = null;
+
+    document.getElementById("btnConnect").addEventListener("click", async () => {
+      bleStatus.textContent = "";
+      try {
+        const device = await navigator.bluetooth.requestDevice({
+          filters: [{ services: [SERVICE_UUID] }],
+          optionalServices: [SERVICE_UUID]
+        });
+        bleDevice = device;
+        bleDevice.addEventListener("gattserverdisconnected", onDisconnected);
+        bleStatus.textContent = "Dispositivo selezionato: " + (device.name || "Senza nome");
+        bleServer = await device.gatt.connect();
+        const service = await bleServer.getPrimaryService(SERVICE_UUID);
+        bleCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+        bleStatus.textContent = "Connesso. Pronto a inviare il valore.";
+        bleStatus.className = "small ok";
+        sendCurrent();
+      } catch (err) {
+        bleStatus.textContent = "Errore: " + err;
+        bleStatus.className = "small err";
+      }
+    });
+
+    document.getElementById("btnDisconnect").addEventListener("click", () => {
+      try {
+        if (bleDevice && bleDevice.gatt.connected) bleDevice.gatt.disconnect();
+        bleStatus.textContent = "Disconnesso.";
+        bleStatus.className = "small";
+      } catch (e) {
+        bleStatus.textContent = "Errore disconnessione: " + e;
+        bleStatus.className = "small err";
+      }
+    });
+
+    function onDisconnected() {
+      bleStatus.textContent = "Dispositivo disconnesso.";
+      bleStatus.className = "small";
+      bleCharacteristic = null;
+      bleServer = null;
+    }
+
+    async function sendCurrent() {
+      if (bleCharacteristic) {
+        try {
+          const data = new Uint8Array([byteValue]);
+          await bleCharacteristic.writeValueWithoutResponse(data);
+          bleStatus.textContent = "Inviato via BLE: " + byteValue;
+          bleStatus.className = "small ok";
+        } catch (e) {
+          bleStatus.textContent = "Errore invio BLE: " + e;
+          bleStatus.className = "small err";
+        }
+      }
+
+      if (window.AppInventor) {
+        try {
+          window.AppInventor.setWebViewString(String(byteValue));
+          wvStatus.textContent = "Inviato a App Inventor (WebViewerString): " + byteValue;
+          wvStatus.className = "small ok";
+        } catch (e) {
+          wvStatus.textContent = "Errore invio a App Inventor: " + e;
+          wvStatus.className = "small err";
+        }
+      }
+    }
+
+    // --- Inizializza ---
+    updateByte(0);
+  </script>
+</body>
+</html>
